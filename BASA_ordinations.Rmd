@@ -206,14 +206,6 @@ plot(varpart(arth.ord$comm.dist, ~PSOCOPTERA, ~COLEOPTERA, ~HEMIPTERA, ~ACARINA,
 ```  
 Interpretation: Shows patterns of co-variance among Orders, which Orders underlie the significant PERMANOVA and their importance (~ partial R2) based on vector length. 
 
-```{r}
-
-sexy.plot
-
-ord.plots$site.env
-ord.plots$site.sp
-```  
-
 ## Sex variation in arthropod community composition  
 
 ### Generate genotpye means for arthropods 
