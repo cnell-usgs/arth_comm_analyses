@@ -1,0 +1,609 @@
+---
+title: "BASA ordinations"
+author: "Colleen Nell"
+date: "9/21/2017"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.width = 6, cache=TRUE)
+
+setwd('/Users/colleennell/Dropbox/Projects/BASA')
+
+library(devtools)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(lme4) #LMM and max liklihood tests
+library(afex) #for parametric bootstrap simulations of deviance stat in LMM
+library(car)
+library(lsmeans)
+library(labdsv)
+library(vegan)
+library(cowplot)
+
+source('BASA_block.r')#add column separating plants into spatial blocks
+source('/Users/colleennell/Dropbox/rstats/theme_nell.R')
+source('/Users/colleennell/Dropbox/Projects/BASA/basa_themes.R')
+source_url("https://raw.githubusercontent.com/collnell/R_vis/master/theme_mooney.R")
+
+se<-function(x) sd(x, na.rm=TRUE)/sqrt(length(x))
+
+set.seed(666)
+```  
+
+# BASA common garden data  
+
+## Read in data:
+### Traits  
+```{r, trait_in}
+##raw trait data
+traits<-read.csv('traits_herb_terp_final.csv')%>%
+  mutate(GENO = ifelse(SEX=='F', FAM-20, FAM))%>%
+  mutate(RGR =  (log(Length_2011)-log(Length_2008))/(3), RGR = ifelse(Length_2011 > 0, RGR, NA), newRGR = log(Length_2011/4))%>%
+  transform(ROW = ordered(ROW), COL = ordered(COL), FAM = factor(FAM), GENO = factor(GENO), BLOCK = as.factor(BLOCK))
+
+##trait lsms
+lsm.row<-read.csv('LSMS_GENO_ROW.csv')
+lsm.row$lsmean<-ifelse(lsm.row$lsmean < 0, 1, lsm.row$lsmean)
+```
+
+
+### Arthropods  
+```{r, arth_in}
+##raw data
+arths_2010<-read.csv('data/BASA_arth_data_2010.csv')[-233:-234,]
+arths_2011<-read.csv('data/BASA_arth_data_2011.csv')[-245:-246,]
+##create df with taxa names, groupings, abundance for 2010 and 2011
+arthropods<-arths_2010%>%melt(id.vars='ID', variable.name='taxa', value.name='2010')%>%
+  full_join(arths_2011%>%melt(id.vars='ID', variable.name='taxa', value.name='2011'), by=c('ID','taxa'))%>%
+  left_join(read.csv('data/BASA_arth_data_FAMID.csv'), by=c('taxa'='Proposed.ID'))%>% ##join with data on arth trophic level etc
+  filter(!taxa %in% c('X','Sample14','sum','Sum'), ID !='sum', ID != '')%>%
+  mutate(`2010` = ifelse(is.na(`2010`), 0, `2010`),`2011` = ifelse(is.na(`2011`), 0, `2011`),
+         total_arths = `2010` + `2011`)
+##genotype means
+arth.ord.fam<-read.csv('LSMS_FAM_ARTH_ORD.csv')
+arth.ord.fam$pos<-ifelse(arth.ord.fam$lsmean <= 0.05, 0, arth.ord.fam$lsmean)
+arth.ord.cast<-arth.ord.fam%>%dcast(SEX+FAM~trait, value.var='pos')
+ord.mat<-arth.ord.cast%>%dplyr::select(-SEX,-FAM)
+
+lsm.row<-read.csv('LSMS_GENO_ROW.csv')
+lsm.cast<-lsm.row%>%dcast(SEX+FAM~trait, value.var='lsmean')
+
+##arthropod lsms
+#by order
+arth.geno<-list(comm.df = read.csv('GENO_LSM_ARTH_ORD_COMM.csv')%>%left_join(lsm.cast%>%dplyr::select(FAM,SEX,RGR,flowers_all, SLA,CN,MT_sum,ST_sum,Per_H2O, leaf.toughness)), comm.mat = read.csv('GENO_LSM_ARTH_ORD_MAT.csv'))
+arth.geno$commdist <-vegdist(arth.geno$comm.mat, method='bray')
+#by guild
+guild.geno<-list(comm.df = read.csv('GENO_LSM_ARTH_GUILD_COMM.csv')%>%left_join(lsm.cast%>%dplyr::select(FAM,SEX,RGR,flowers_all,SLA,CN,MT_sum,ST_sum,Per_H2O,leaf.toughness)), comm.mat = read.csv('GENO_LSM_ARTH_GUILD_MAT.csv'))
+guild.geno$commdist <-vegdist(guild.geno$comm.mat, method='bray')
+
+```
+
+## Generate community dataframes for multivariate analyses  
+```{r, comm_df}
+#arth_comm_ind(trophic = c('arths','Herb','Pred','Omni','Detrit'), group = c('Order','Family','taxa',etc), dist, log=TRUE/FALSE, rel.abun=TRUE/FALSE)
+# returns a community df with grouping variables, community matrix, log transformed matrix, relative abundance matrix, and dissimilarity matrix
+
+##for all arthropods at the order level
+arth.ord<-arth_comm_ind(trophic='arths', group = 'Order', dist='bray', log=FALSE)
+str(arth.ord, max.level=1)
+```
+I calculated the relative density of arthropod Orders (`r length(colnames(arth.ord$comm.mat))`;`r colnames(arth.ord$comm.mat)`) and calcualted pairwise Bray-Curtis dissimilarities between plants.  
+
+# Community analyses  
+Is there genetic variation in arthropod community composition?   
+Is there sexual dimorphism in arthropod community composition?  
+Do plant traits explain variation in arthropod community composition?  
+Do genotypic traits relate to composition?  
+
+
+## Genotypic variation in arthropod community composition  
+  
+### PERMANOVA provides R2  
+Use a PERMANOVA to test for genetic variation in arthropod community composition, with permutations constrained within garden block.  
+```{r, arth_genvar}
+##permanova testing for effect of genotype on arthropod composition, permutations constrained within garden block
+arth.ad<-adonis2(arth.ord$comm.dist~FAM, data=arth.ord$comm.df, permutations=1000, strata='SEX')
+arth.ad
+##get r2 values
+arth.ad.r<-adonis(arth.ord$comm.dist~FAM, data=arth.ord$comm.df, permutations=10000)
+arth.ad.r
+
+```
+### Partition of variation  
+Partition variation in community data of dissimilarities with respect to explanatory variables. Uses adjusted R-sq in dbRDA to determine the unique and shared variation. Order of conditions matters (sequential). Use to find variation explained by genotype, while control for spatial block. Individual fractions give the Adj.Rsquared for each factor that is not explained by other factors.  
+```{r, varpart}
+##ROW is better thank block?
+varpart(arth.ord$comm.dist, ~BLOCK, ~FAM, ~SEX,data=arth.ord$comm.df)
+```  
+### Unconstrained ordination of arthropod composition   
+To examine patterns in arthorpod community composition among genotypes, I am using a PCoA (MDS) conditioned by common garden block and water treatment. PCoA gives a euclidean representation of distances using any dissimilarity measure, is an eigen decomposition of the (transformed) dissimilarity matrix and returns orthrogonoal axes whose importance is measured by eignvalues. PCoA on euclidean distances is the same as PCA. 
+```{r, pcoa}
+##PCoA or NMDS - or using capscale but unconstrained
+##conditioned by garden block and water treatment
+pco.ord<-capscale(arth.ord$comm.dist ~ 1 + Condition(arth.ord$comm.df$BLOCK)+Condition(arth.ord$comm.df$SEX), data=arth.ord$comm.df, comm = arth.ord$comm.mat)
+head(summary(pco.ord))
+```
+```{r}
+##unconditioned
+pco.unc<-capscale(arth.ord$comm.dist ~ 1, data=arth.ord$comm.df, comm = arth.ord$comm.mat)
+head(summary(pco.unc))
+
+```  
+
+### Total variance explained  
+Eigenvalues - how much of the variance is explained by the individual aves of the ordination. The sum of eigenvalues is the total variance in the dissimilarity matrix hence expressing individual eigenvalues as a proportion of the sum ofeigenvalues gives you the proportion (or %) variance explained by each axis.  
+Total explained intertia = sum of eignevalues of constrained axes?
+Unconstrained axes are residual. Total intertia in species data is the sum of both constrained and unconstrained. Total vs explained intertia is measure of how well species composition is explained by variables.
+```{r}
+eig<-eigenvals(pco.ord)##extract eignevalues
+eig[1:3] / sum(eig) #proportion of variance explained by each axis
+cumsum(eig[1:3] / sum(eig))#cumulative sum of 
+
+##negative eighnvalues?? due to noeuclidean dissimilarities - add constant of srqt to dissimilarities
+```  
+
+Summary: Arthropod densities were transformed to relative density of Order to remove the effect of total density. Then Bray-Curtis dissimilarities were calculated between every pair of plants and an unconstrained ordination was done using PCoA (metric MDS) on the dissimilarity matrix. 
+
+### Ordination  
+```{r, include=FALSE}
+#plot centroids for each genotype, unconstrained ordination
+plot.df.ind<-data.frame(ID = rownames(pco.ord$CA$u), SEX= arth.ord$comm.df$SEX, 
+                        FAM=arth.ord$comm.df$FAM, WATER=arth.ord$comm.df$WATER, BLOCK=arth.ord$comm.df$BLOCK,
+                        CAP1 = scores(pco.ord, scaling=3, correlation=TRUE)$sites[,1], 
+                        CAP2 = scores(pco.ord, scaling=3, correlation=TRUE)$sites[,2])
+
+##this si scaling 2 (species axes correlations)
+plot.df.sp<-data.frame(label=rownames(scores(pco.ord, scaling=3, correlation=TRUE)$species), 
+                       CAP1 = scores(pco.ord, scaling=3, correlation=TRUE)$species[,1], 
+                       CAP2 = scores(pco.ord, scaling=3, correlation=TRUE)$species[,2])
+
+##axis labels with var explained
+xlabel<-paste0('MDS1 (', round(100*cumsum(eig / sum(eig))[[1]],2), '% of total variation)')
+ylabel<-paste0('MDS2 (', round(100*(eig[[2]] / sum(eig)),2), '% of total variation)')
+
+##use envfit for fitted order arrows
+#inertia is variance in species abundance
+pco.env<-envfit(pco.ord, arth.ord$comm.df%>%dplyr::select(FAM, SEX))
+fam.center<-data.frame(FAM = rownames(pco.env$factors$centroids), MDS1 = pco.env$factors$centroids[,1], MDS2 = pco.env$factors$centroids[,2])
+
+##this is all executed with the Plot_cap_df function
+```
+
+### Unconstrained ordination of arthrpod composition:  
+Using plot_cap function. By individual plant and then the centroid for each plant genotype (n=39). Arrows are species scores.    
+```{r, fig.width=7}
+##get data for plotting ordination
+ord.df<-plot_cap_df(pco.ord, species=TRUE, data=arth.ord$comm.df, scaly=2)
+
+#generate plots
+ord.plots<-unc_plot(df=ord.df, fam.df=ord.df$fam.df, ind.df = ord.df$ind.df, species=ord.df$sp.df, env=ord.df$sp.env)
+
+```  
+
+```{r, fig.width=14, fig.height=10}
+sexy.plot<-ord.plots$site.sp+
+  geom_text(data=ord.df$sex.center, aes(x=MDS1, y=MDS2, label=FAM), size=8)+
+  stat_ellipse(aes(group=SEX, lty=SEX))+
+  scale_fill_manual(values=c('black','white','black','white'))+
+  theme(legend.position='none')
+
+#plot in grid to compare
+plot_grid(ord.plots$ind, ord.plots$sites,  ord.plots$site.sp, sexy.plot, labels=c('Individual plants','Genotype centroids','Genotypes + Orders', '+ SEX centroids'))
+
+
+##For genotypes, condition by SEX - 
+
+```  
+
+
+Report % of variation explained by those Orders shown and % variation by each Order  
+```{r}
+##percent var = rsq
+#plot.df$sp.env
+plot(varpart(arth.ord$comm.dist, ~PSOCOPTERA, ~COLEOPTERA, ~HEMIPTERA, ~ACARINA, data=arth.ord$comm.df))
+
+```  
+Interpretation: Shows patterns of co-variance among Orders, which Orders underlie the significant PERMANOVA and their importance (~ partial R2) based on vector length. 
+
+```{r}
+
+sexy.plot
+
+ord.plots$site.env
+ord.plots$site.sp
+```  
+
+## Sex variation in arthropod community composition  
+
+### Generate genotpye means for arthropods 
+This function takes a trophic group (arths, Pred, Herb, Detrit), aggregation level (Order, Family, Guild, taxa), 
+```{r, eval=F}
+#arth_comm_geno(trophic='arths', group='Order', dist='bray', log=FALSE, rel.abun=TRUE) 
+
+##for all arthropods, order level, relative abundances
+arth.geno<-arth_comm_geno('arths','Order','bray',log=FALSE, rel.abun=TRUE)
+
+##save data
+write.csv(arth.geno$lsms, 'GENO_LSM_ARTH_ORD.csv', row.names=FALSE)
+write.csv(arth.geno$comm.df, 'GENO_LSM_ARTH_ORD_COMM.csv', row.names=FALSE)
+write.csv(arth.geno$comm.mat, 'GENO_LSM_ARTH_ORD_MAT.csv', row.names=FALSE)
+```   
+
+### PERMANOVA provides R2 for sexual dimorphism    
+```{r}
+arth.geno<-list(comm.df = read.csv('GENO_LSM_ARTH_ORD_COMM.csv')%>%transform(FAM = as.factor(FAM)), comm.mat = read.csv('GENO_LSM_ARTH_ORD_MAT.csv'))
+arth.geno$comm.dist <-vegdist(arth.geno$comm.mat, method='bray')
+
+#sex text
+arth.ad.rg<-adonis(arth.geno$comm.dist~SEX, data=arth.geno$comm.df, permutations=10000)
+arth.ad.rg
+```  
+
+Biplot ordination based on genotypic means including male and female centroids and maybe confidence intervals  
+Vectors arrows for Orders significant (P<0.05)  
+```{r}
+pco.geno<-capscale(arth.geno$comm.dist ~ 1 , data=arth.geno$comm.df, comm = arth.geno$comm.mat)
+#str(arth.geno$comm.df)
+eig<-eigenvals(pco.geno)##extract eignevalues
+eig[1:3] / sum(eig) #proportion of variance explained by each axis
+cumsum(eig[1:3] / sum(eig))
+
+head(summary(pco.geno))
+
+```  
+
+```{r, fig.width=14}
+plot.g<-plot_cap_df(pco.geno, species=TRUE, data=arth.geno$comm.df, scaly=2)
+levels(plot.g$sex.center$FAM)
+plot.gen<-unc_plot(df=plot.g, fam.df=plot.g$ind.df, ind.df = plot.g$ind.df,species=plot.g$sp.df, env=plot.g$sp.env)
+
+##add centroids for each sex and 95% CI
+sex.plot.geno<-plot.gen$site.env+geom_text(data=plot.g$sex.center, aes(x=MDS1, y=MDS2, label=FAM), size=10)+
+  stat_ellipse(aes(group=SEX, lty=SEX, fill=SEX), size=1 ,type='t', level=.95)+scale_fill_manual(values=c('black','white','black','white'))+theme(legend.position='none')
+
+plot_grid(plot.gen$sites,  plot.gen$site.sp, plot.gen$site.env, sex.plot.geno, labels=c('Genotype means','Genotypes + Orders', 'Geno w/ site.env','Sex center + 95%CI'),nrow=2, ncol=2)
+
+##horseshoe
+```  
+Final plot:  
+```{r, fig.width=14, fig.height=7}
+
+plot_grid(ord.plots$site.sp, sex.plot.geno, labels=c('Genotype centroids','Genotpye means with sex centroids % 95%CI'))
+```
+Report % of variation explained by those Orders shown and % variation by each Order.  
+So at the genotype level, Hemiptera, Psocoptera, Coleoptera, Hymenoptera, Acarina, and Araneae explain differenes among plants. At the sex level, genotypes differed in Psocoptera, Coleoptera, Hmiptera, and Acarina. The rarer Orders were less important. In this case, a larger portion of the variance was explained (just due to error accounted for in lsmeans? fewer data points?) 
+
+I think these are the right plots to present - ideally would rotate them etc? Confusing that points are not exactly the same? Should jsutoverlay same attributes to the cenotype centroids?  
+```{r}
+plot.g$sp.env
+plot(varpart(arth.geno$comm.dist, ~COLEOPTERA, ~PSOCOPTERA, ~HEMIPTERA, ~ACARINA,data=arth.geno$comm.df))
+
+```
+
+Interpretation: Shows patterns of co-variance among Orders, which Orders underlie the significant PERMANOVA and their importance (~ partial R2) based on vector length.  
+
+Note: 1 and 2 may look very similar in terms of distribution of points / those vectors associated with sexual dimporphism  
+
+### Arthropod functional groups  
+Genetic variation in functional group composition?   
+```{r, fig.width=14}
+arth.guild<-arth_comm_ind(trophic='arths', group = 'Guild', dist='bray', log=FALSE)
+
+##fucntional group composition
+guild.ad<-adonis2(arth.guild$comm.dist~FAM, data=arth.guild$comm.df, permutations=5000, strata='BLOCK')
+guild.ad
+guild.ad.r<-adonis(arth.guild$comm.dist~FAM, data=arth.guild$comm.df, permutations=5000)
+guild.ad.r
+
+pco.guild<-capscale(arth.guild$comm.dist~1+Condition(arth.guild$comm.df$ROW+arth.ord$comm.df$WATER), data=arth.guild$comm.df, comm= arth.guild$comm.mat)
+head(summary(pco.guild)) ##72 % of variation 
+eig<-eigenvals(pco.guild)##extract eignevalues
+eig[1:3] / sum(eig) #proportion of variance explained by each axis
+cumsum(eig[1:3] / sum(eig))#cumulative sum of 
+
+##based on guilds
+##plotting df
+guild.df<-plot_cap_df(pco.guild, species=TRUE, data=arth.guild$comm.df, scaly=2)
+## build plots
+guild.plot<-unc_plot(df=guild.df, fam.df=guild.df$fam.df, ind.df = guild.df$ind.df, species=guild.df$sp.df, env=guild.df$sp.env)
+##update plot to have sex centroids and 95%CI ellipsess
+sexy.plot.g<-guild.plot$site.sp+
+  geom_point(data=guild.df$sex.center, aes(x=MDS1, y=MDS2, fill=FAM), shape=21, size=8, stroke=2)+
+  geom_text(data=guild.df$sex.center, aes(x=MDS1, y=MDS2+.06, label=FAM), size=5)+
+  stat_ellipse(aes(group=SEX, lty=SEX))+scale_fill_manual(values=c('black','white','black','white'))+
+  theme(legend.position='none')
+
+##multiple panel plot
+plot_grid(guild.plot$ind, guild.plot$sites,  guild.plot$site.sp, sexy.plot.g, labels=c('Individual plants','Genotype centroids','Genotypes + Orders', '+ SEX centroids'))
+
+```  
+Arthropod guilds by genotype:   
+```{r, eval=F}
+##for all arthropods, order level, relative abundances
+guild.geno<-arth_comm_geno('arths','Guild','bray',log=FALSE, rel.abun=TRUE)
+
+write.csv(guild.geno$lsms, 'GENO_LSM_ARTH_GUILD.csv', row.names=FALSE)
+write.csv(guild.geno$comm.df, 'GENO_LSM_ARTH_GUILD_COMM.csv', row.names=FALSE)
+write.csv(guild.geno$comm.mat, 'GENO_LSM_ARTH_GUILD_MAT.csv', row.names=FALSE)
+
+```  
+```{r}
+guild.geno<-list(comm.df = read.csv('GENO_LSM_ARTH_GUILD_COMM.csv'), comm.mat = read.csv('GENO_LSM_ARTH_GUILD_MAT.csv'))
+guild.geno$commdist <-vegdist(guild.geno$comm.mat, method='bray')
+
+```
+## Linking traits to arthropods  
+Constrained biplot ordination based on individual plants to visualize genotypic centroids, coded as males and females
+One plot (a) with vectors arrows for Orders significant (P<0.05)
+Once plot (b) with vector arrows for traits significant (P<0.05)
+Report % of variation explained by constrained ordination (first to PCs)  
+
+### Indirect gradient analysis - 
+Ordinates community data according to their similarity in species composition. Relationships between pecies and environmental gradients are investigated by correlated ordination scores with environmental variables. (vs direct which ordinates on environment and then looks at how species relate to ordination scores). Constrained uses both daasets to infer patterns in composition from patterns in environmental variables. Identifies which environmental variables are most important in structuring the community and how environmental variables are related, and how the community varies along these gradients.
+
+Cons: loses structure between predictor and response variables.Cross-correlated components. 
+Canonical - something being optimized against some other constraint.Canonical correlation analysis- rotation techinique for constrained. Rotate predictor and respond independently to maimize correlation between correesponding variables. 
+
+### Direct gradient analysis  
+Relate secies to environmental factors, CCA and RDA. Uses dimension reduction.Both appropriate under linear model if using species composition rather than absolute abundances (ter Braak & Smilauer 1988). 
+
+#### CCA - mmaximize correlations between response and predictor variables BUT response scores are constrained to be linear combinations of predictor variables to maximize the variance explained by the predictor data.Uses multiple regression to solve linear combinations of predictors. Relative abundance. Constrained CA - good for ecological data (unimodality is common). Constrained to be linear combos of explanatory variables. Maximizes the correlation between species scores and site scores. More about composition (relative abundance).  
+
+
+#### RDA - find linear combinations of predictor variables to represent as much variance in the response as possible. Detects gradient which all species are positively correlated, but CCA will not. 
+Can do a partial RDA - can use block as covariable to factor out local effects. In RDA variance explained is easier to aprtition and interpret eignevalues. Constrained PCA (inappropriate under unimodal model). Species and environmental variables represented using arrows. 
+
+#### dbRDA - RDA with non euclidean distances, but still linear and metric. Constrained version of metric scaling (PCoA), which uses non-Euclidean distances.   
+
+Partial RDA (pRDA) to test multivariate response of athropod composition and trait composition across genotypes and between sexes. 
+```{r}
+##dbRDA
+##using individual plants relating to traits
+##this uses only half of the plants because there is not arthropod data for all of them?
+plant.df<-arth.ord$comm.df%>%filter(complete.cases(MT_sum), complete.cases(Per_H2O), complete.cases(CN))
+str(plant.df)
+##scale traits?
+trait.scale<-as.data.frame(scale(plant.df%>%dplyr::select(RGR:CN)))%>%mutate(ID=plant.df$ID)%>%left_join(plant.df%>%dplyr::select(ID,FAM:COL), by='ID')
+
+##matrix of arthropod relative density
+plant.mat<-plant.df%>%filter(complete.cases(MT_sum), complete.cases(Per_H2O), complete.cases(CN))%>%
+  dplyr::select(ACARINA:`NA`)%>%mutate(total=rowSums(.,na.rm=TRUE))%>%mutate_all(funs(./total))%>%dplyr::select(-total)
+##relative densities, bray cutus
+plant.dist<-vegdist(plant.mat, method='bray')
+
+##dbRDA
+##conditioned on ROW (pRDA)
+db.ind<-capscale(plant.dist ~ RGR+flowers_all+SLA+CN+Per_H2O+MT_sum+leaf.toughness+Condition(trait.scale$BLOCK)+Condition(trait.scale$SEX), data=trait.scale, comm = plant.mat, na.action = 'na.omit')
+
+head(summary(db.ind))
+anova(db.ind, permutations=1000)
+anova(db.ind, by='margin', permutations=1000)
+#cond on sex - flowers, sla, sn perh20
+
+## unconditioned - flowers, SLA, CN, Per_H2)
+#pRDA block - flowers, SLA, CN, perh20
+##traits scaled - flowers, sla, sn perhh20. cond on block - 
+```  
+```{r, fig.width=7, fig.height=8}
+#plot.db<-plot_cap_df(db.ind, species=TRUE, data=arth.ord$comm.df, scaly=2)
+
+#plot centroids for each genotype, unconstrained ordination
+ind.db<-data.frame(SEX= arth.ord$comm.df$SEX, ID=rownames(db.ind$CA$u),
+                        FAM=arth.ord$comm.df$FAM, 
+                        MDS1 = scores(db.ind, scaling=2, correlation=TRUE)$sites[,1], 
+                        MDS2 = scores(db.ind, scaling=2, correlation=TRUE)$sites[,2])
+
+##axis labels with var explained
+eig<-eigenvals(db.ind)
+xlabel<-paste0('MDS1 (', round(100*cumsum(eig / sum(eig))[[1]],2), '% of total variation)')
+ylabel<-paste0('MDS2 (', round(100*(eig[[2]] / sum(eig)),2), '% of total variation)')
+
+##use envfit for fitted order arrow significance and fam centroids
+
+pco.env<-envfit(db.ind, plant.df%>%dplyr::select(FAM,SEX,ACARINA:THYSANOPTERA))
+arrow.df<-data.frame(order= rownames(pco.env$vectors$arrows), MDS1 = pco.env$vectors$arrows[,1], MDS2 = pco.env$vectors$arrows[,2], pval = pco.env$vectors$pvals, rsq = pco.env$vectors$r)%>%filter(pval <= 0.05 ,rsq > 0.10)
+
+fam.c<-data.frame(FAM = rownames(pco.env$factors$centroids), MDS1 = pco.env$factors$centroids[,1], MDS2 = pco.env$factors$centroids[,2])
+fam.center<-fam.c%>%filter(grepl('FAM', FAM))%>%
+  mutate(FAM =gsub('FAM','', FAM))%>%
+  left_join(arth.ord$comm.df%>%dplyr::select(FAM,SEX)%>%unique()%>%transform(FAM=as.character()))
+fam.center$SEX<-ifelse(fam.center$FAM > 20, 'F', 'M')
+
+sex.center<-fam.c%>%filter(FAM == 'SEXM' | FAM =='SEXF')
+
+#dbRDA##
+plot.df.gg<-data.frame(order=rownames(scores(db.ind, scaling=2, correlation=TRUE)$species), 
+                       MDS1 = scores(db.ind, scaling=2, correlation=TRUE)$species[,1], 
+                       MDS2 = scores(db.ind, scaling=2, correlation=TRUE)$species[,2])%>%filter(order %in% arrow.df$order)
+
+##add trait arrows
+#vectors for traits
+arrows<-as.data.frame(summary(db.ind)$biplot)
+arrows$trait<-rownames(arrows)
+View(arrows)
+str(arrows)
+arrows$MDS1<-arrows$CAP1
+arrows$MDS2<-arrows$CAP2
+arrows<-arrows%>%filter(trait %in% c('flowers_all','Per_H2O','SLA','CN'))
+
+#df<-list(ind.df = ind.db, fam.df = fam.center, sp.df=plot.df.gg, sp.env = arrow.df, ylab=ylabel, xlab=xlabel,pco.fit=pco.env, sex.center = sex.center)
+
+#plot.db<-unc_plot(df=df, fam.df=df$fam.df, ind.df = df$ind.df,species=df$sp.df, env=df$sp.env, arrow.rel = 3)
+
+#site.sp.trait<-plot.db$site.sp+geom_segment(data = arrows, aes(x = 0, xend = CAP1, y = 0, yend = CAP2),arrow = arrow(length = unit(0.2, "cm")), colour = "gray", size=1)+
+  geom_text(data = arrows, aes(x = CAP1, y = CAP2, label=trait))
+
+#plot_grid(plot.db$ind, plot.db$sites,  plot.db$site.sp, site.sp.trait, labels=c('Individual plants','Genotype centroids','Genotypes + Orders', 'Geno w/ orders & traits'))
+
+
+site.sp.plot<-ggplot(fam.center, aes(x=MDS1, y=MDS2))+
+    geom_jitter(aes(fill=SEX), shape=21,size=2, alpha=.9)+
+    theme_nell()+
+    scale_fill_manual(values=c('black','white'))+
+    theme(axis.line=element_blank())+
+    geom_hline(aes(yintercept=0), lty='dashed')+
+    geom_vline(aes(xintercept=0), lty='dashed')+
+    geom_segment(data = plot.df.gg, aes(x = 0, xend = MDS1, y = 0, yend = MDS2),
+                                           arrow = arrow(length = unit(0.2, "cm")), colour = "black", size=1)+
+    geom_text(data=plot.df.gg, aes(x=MDS1, y=MDS2, label=order))+
+    geom_segment(data =arrows, aes(x = 0, xend = MDS1*2, y = 0, yend = MDS2*2),
+                                           arrow = arrow(length = unit(0.2, "cm")), colour = "green", size=1)+
+  geom_text(data=arrows, aes(x=MDS1*2, y=MDS2*2, label=trait))
+site.sp.plot
+##ad trait arrows
+
+```
+#### Using genotype means  
+```{r, fig.height=10, fig.width=12}
+##Do traits explain differences in arthropod composition between the sexes?
+geno.df<-arth.geno$comm.df
+geno.mat<-arth.geno$comm.mat
+geno.scale<-as.data.frame(scale(plant.df%>%dplyr::select(RGR:CN)))%>%mutate(FAM=plant.df$FAM, SEX=plant.df$SEX)
+geno.dist<-vegdist(geno.mat, method='bray')
+
+db.geno<-capscale(geno.dist ~ RGR+log(flowers_all)+SLA+CN+Per_H2O+MT_sum+leaf.toughness, data = geno.df, comm=geno.mat)
+head(summary(db.geno))
+anova(db.geno, by='margin', permutations=1000)
+#CAP1 - 57, CAP2 = 21
+##trait: RGR, flowers, SLA, perH20, leaf.toughness
+
+#plot centroids for each genotype, unconstrained ordination
+geno.db<-data.frame(SEX= geno.df$SEX, ID=rownames(db.geno$CA$u),
+                        FAM=geno.df$FAM, 
+                        MDS1 = scores(db.geno, scaling=2, correlation=TRUE)$sites[,1], 
+                        MDS2 = scores(db.geno, scaling=2, correlation=TRUE)$sites[,2])
+str(geno.db)
+##axis labels with var explained
+eig<-eigenvals(db.geno)
+xlabel<-paste0('MDS1 (', round(100*cumsum(eig / sum(eig))[[1]],2), '% of total variation)')
+ylabel<-paste0('MDS2 (', round(100*(eig[[2]] / sum(eig)),2), '% of total variation)')
+
+##use envfit for fitted order arrow significance and fam centroids
+
+geno.env<-envfit(db.geno, geno.df%>%dplyr::select(FAM,SEX,ACARINA:THYSANOPTERA))
+arrow.geno<-data.frame(order= rownames(geno.env$vectors$arrows), MDS1 = geno.env$vectors$arrows[,1], MDS2 = geno.env$vectors$arrows[,2], pval = geno.env$vectors$pvals, rsq = geno.env$vectors$r)%>%filter(pval <= 0.05 ,rsq > 0.10)
+geno.env
+
+fam.cg<-data.frame(FAM = rownames(geno.env$factors$centroids), MDS1 = geno.env$factors$centroids[,1], MDS2 = geno.env$factors$centroids[,2])
+fam.center.g<-fam.cg%>%filter(grepl('FAM', FAM))%>%
+  mutate(FAM =gsub('FAM','', FAM))%>%
+  left_join(arth.ord$comm.df%>%dplyr::select(FAM,SEX)%>%unique()%>%transform(FAM=as.character()))
+fam.center.g$SEX<-ifelse(fam.center.g$FAM > 20, 'F', 'M')
+
+sex.center.g<-fam.cg%>%filter(FAM == 'SEXM' | FAM =='SEXF')
+
+#dbRDA##
+plot.df.ggg<-data.frame(order=rownames(scores(db.geno, scaling=2, correlation=TRUE)$species), 
+                       MDS1 = scores(db.geno, scaling=2, correlation=TRUE)$species[,1], 
+                       MDS2 = scores(db.geno, scaling=2, correlation=TRUE)$species[,2])%>%filter(order %in% arrow.geno$order)
+
+##add trait arrows
+#vectors for traits
+arrowsg<-as.data.frame(summary(db.geno)$biplot)
+arrowsg$trait<-rownames(arrowsg)
+arrowsg$MDS1<-arrowsg$CAP1
+arrowsg$MDS2<-arrowsg$CAP2
+arrowsg<-arrowsg%>%filter(trait %in% c('log(flowers_all)','Per_H2O','SLA','RGR','leaf.toughness'))
+
+site.sp.plot<-ggplot(geno.db, aes(x=MDS1, y=MDS2))+
+    geom_jitter(aes(fill=SEX), shape=21,size=2, alpha=.9)+
+    theme_nell()+
+    scale_fill_manual(values=c('black','white'))+
+    theme(axis.line=element_blank())+
+    geom_hline(aes(yintercept=0), lty='dashed')+
+    geom_vline(aes(xintercept=0), lty='dashed')+
+    geom_segment(data = plot.df.ggg, aes(x = 0, xend = MDS1, y = 0, yend = MDS2),
+                                           arrow = arrow(length = unit(0.2, "cm")), colour = "black", size=1)+
+    geom_text(data=plot.df.ggg, aes(x=MDS1, y=MDS2, label=order))+
+    geom_segment(data =arrowsg, aes(x = 0, xend = MDS1*2, y = 0, yend = MDS2*2),
+                                           arrow = arrow(length = unit(0.2, "cm")), colour = "green", size=1)+
+  geom_text(data=arrowsg, aes(x=MDS1*2, y=MDS2*2, label=trait))
+site.sp.plot
+```
+
+
+### Hypothesis testing  
+```{r, eval=F}
+
+##test significance of ordination using permutation tests
+ind.pcoa.sig<-anova(dbrda.ind, permutations=100) ##overall ordination
+ind.axis.sig<-anova(dbrda.ind, by='axis', permutations=100) ##significance of anxes
+ind.term.sig<-anova(dbrda.ind, by='terms', permutations=100) ##sequential test of terms
+ind.marg.sig<-anova(dbrda.ind, by='margin', permutations=1000)##marginal test of terms (when all other model terms are incldued)
+
+ind.pcoa.sig
+ind.axis.sig
+ind.term.sig
+ind.marg.sig
+
+##first 2 axes are significant
+g.pcoa.sig<-anova(db.geno, permutations=100) ##overall ordination
+g.axis.sig<-anova(db.geno, by='axis', permutations=100) ##significance of anxes
+g.term.sig<-anova(db.geno, by='terms', permutations=10000) ##sequential test of terms
+g.marg.sig<-anova(db.geno, by='margin', permutations=10000)##marginal test of terms (when all other model terms are incldued)
+
+g.pcoa.sig#overall yes
+g.axis.sig##first 2 sig
+g.term.sig #RGR, flowr
+g.marg.sig#RGR, flowers, SLA 0.06, leaf.toughness 0.1, perh20-0.09
+```  
+```{r, eval=F}
+
+#species snv correlation - for constrained ord
+spenvcor(pco.guild)
+#use step aic to determine best formula(
+mod.null<-pco.ord
+mod.full<-capscale(arth.ord$comm.dist ~  + Condition(arth.ord$comm.df$ROW)+Condition(arth.ord$comm.df$WATER), data=arth.ord$comm.df, comm = arth.ord$comm.mat)
+m<-step(mod.null, scope=formula(mod.full) test='perm')
+ordistep
+
+```
+Interpretation: the % variance explained here could be compared to the % explained by the unconstrained to learn the importance of the measured traits.  Allows us to see what Orders are driven by traits (and which traits) by comparing this to the unconstrained ordination. 
+
+Also, this analysis would be linked back to see if the particular arthropod Orders that separate sexes in #3 are (1) the arthropod orders that vary in the unconstrained ordination above (#2) and also whether the traits driving this separation  and are the ones that vary between the sexes in the first analyses. 
+
+Distance-based redundancy analysis (dbRDA) ordination biplot showing genotypic variation in arthropod community composition as related to plant traits (F = 2.15, P = 0.002). The first 2 CAP axis were significant (P = 0.0002; P = 0.018), and together accounted for 75% of variation in traits.  Ordination is based on Bray-Curtis dissimilarity among genotypes, of the relative density of arthropod orders. For each arthropod order observed, arthropod density was computed as the fitted genotypic mean after accounting for the random effects of spatial block and water treatment (model: density ~ genotype + (1|water) + (1| block); lsmeans package). Biplot arrows reflect plant traits that best explained variation in arthropod community composition (P < 0.10). Permutation tests (4000) were used to determine axis and trait significance. 
+
+
+## Procrustes analysis  
+Constrained and unconstrained (exploratory) methods should be used in parallel  
+If constrained and unconstrained are the same, it mean the environmentalvariables explain most of the biological variation  
+Can do this with Procrustes analysis (Gower 1975).  
+Estimates the concordance of scores in two ordinations after rotating, translating, and dilating them to obtain the best fit. 
+
+## Procrustes transformation  
+How similar is the ordination of genotype centroids to the genotype means?  
+How similar is the unconstrained ordination to the constrained?  
+How does trait space relate to composition?  
+
+PRocrustes distnace -the sum of the distances between corresponding landmarks of 2 shapes  
+Centroid size- the sum of the distances from centroid to landmark
+```{r, fig.width=10}
+library(MCMCpack)
+g.cent<-ord.df$fam.df[,2:3]
+
+sex.cent<-plot.g$fam.df[,2:3]
+str(g.cent)
+crusty.sex<-vegan::procrustes(X=g.cent, Y=sex.cent, scale=TRUE)
+summary(crusty.sex)
+
+protest(X=g.cent, Y=sex.cent, scale=TRUE)
+
+##yes these are very similar
+
+pro.plot<-data.frame(MDS1=crusty.sex$Yrot[,1], MDS2=crusty.sex$Yrot[,2],xMDS1=crusty.sex$X[,1], xMDS2=crusty.sex$X[,2], FAM=ord.df$fam.df$FAM, SEX=ord.df$fam.df$SEX)
+ggplot(pro.plot)+
+  geom_point(aes(x=MDS1, y=MDS2, colour=SEX), shape=21, size=2)+ 
+  geom_point(aes(x=xMDS1, y=xMDS2, colour=SEX))+
+  geom_segment(aes(x=MDS1,y=MDS2,xend=xMDS1,yend=xMDS2,colour=SEX),arrow=arrow(length=unit(0.2,"cm")))+
+  scale_color_manual(values=c('black','grey'))+
+  theme(axis.line=element_blank())+
+  geom_hline(aes(yintercept=0), lty='dashed')+
+  geom_vline(aes(xintercept=0), lty='dashed')
+##the empty circles here are the genotype means
+
+```  
+
+## Final plots  
+Fig. 1. Unconstrained ordination of arthropod community composition (relative density)
