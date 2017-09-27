@@ -98,9 +98,13 @@ arth.ad
 arth.ad.r<-adonis(arth.plant$comm.dist~FAM, data=arth.plant$comm.df, permutations=10000)
 arth.ad.r
 
-capscale(varpart(arth.plant$comm.dist, ~SEX,~PSOCOPTERA, ~COLEOPTERA, ~HEMIPTERA,data=arth.plant$comm.df))
 ##FAM rsq= 0.09??
+```  
+Stepwise permutation tests in constrained ordination  
+```{r}
+ordistep()
 ```
+
 
 ```{r}
 ######
@@ -211,7 +215,7 @@ Can do a partial RDA - can use block as covariable to factor out local effects. 
 #### dbRDA - RDA with non euclidean distances, but still linear and metric. Constrained version of metric scaling (PCoA), which uses non-Euclidean distances.   
 
 Genetic variation:  
-analysis is restricted to plants that have arthropods AND traits measured (~50% of plants)
+analysis is restricted to plants that have arthropods AND traits measured (n = 122; ~50% of plants)
 ```{r}
 # community df with only plants that have all traits measured as well as arthropod relative density
 plant.df<-cbind(arth.plant$comm.df%>%dplyr::select(ID, SEX, FAM, ROW, COL, BLOCK, WATER, RGR, flowers_all, SLA, CN, Per_H2O, MT_sum,leaf.toughness), arth.plant$comm.mat)%>%
@@ -222,83 +226,179 @@ plant.mat<-plant.df%>%dplyr::select(ACARINA:`NA`)%>%mutate(total=rowSums(.,na.rm
 plant.dist<-vegdist(plant.mat, method='bray')##relative densities, bray cutus
 
 #traits
-trait.scale<-as.data.frame(scale(plant.df%>%dplyr::select(RGR:leaf.toughness)))%>%##scale traits
+trait.scale<-as.data.frame(scale(plant.df%>%transform(flowers_all = log(flowers_all+2), MT_sum = log(MT_sum+1))%>%dplyr::select(RGR:leaf.toughness)))%>%##scale traits
   mutate(ID=plant.df$ID)%>%left_join(plant.df%>%dplyr::select(ID:WATER), by='ID') ##add ing rouping vars
-str(plant.df)
+
 ##dbRDA - conditioned on ROW (pRDA)
-db.ind<-capscale(plant.dist ~ RGR+log(flowers_all+2)+SLA+CN+Per_H2O+log(MT_sum)+leaf.toughness+Condition(trait.scale$SEX), data=trait.scale, comm = plant.mat, na.action = 'na.omit')
+db.ind<-capscale(plant.dist ~ RGR+flowers_all+SLA+CN+Per_H2O+MT_sum+leaf.toughness+Condition(trait.scale$SEX), data=trait.scale, comm = plant.mat, na.action = 'na.omit')
 
 head(summary(db.ind)) ##constrained = .11; unconstrained = .62
 anova(db.ind, permutations=1000)  
 anova(db.ind, by='axis', permutations=1000)
-anova(db.ind, by='margin', permutations=1000)
-##traits = flowers, sla, cn pw
-```
+anova(db.ind, by='marginal', permutations=1000)
+##traits = flowers, sla, cn
+##18% explained by traits when conditioned by sex and block (residual variation not including the ocnditioned)
+#CAP1 = 
+
+## so use marginal tests? 
+```  
+Partial db-RDA (controlling for plant sex) on genetic variation in arthropods constrained by traits (scaled).  
+#### Constrained ordination plots  
+Genotype centroids:  
 ```{r}
 #dbRDA##build the plot
-#plot centroids for each genotype, unconstrained ordination
-ind.db<-data.frame(SEX= arth.plant$comm.df$SEX, ID=rownames(db.ind$CA$u),
-                        FAM=arth.plant$comm.df$FAM, 
-                        MDS1 = scores(db.ind, scaling=3, correlation=TRUE)$sites[,1], 
-                        MDS2 = scores(db.ind, scaling=3, correlation=TRUE)$sites[,2])
-
-##use envfit for fitted order arrow significance and fam centroids
-btt<-cbind(plant.df%>%dplyr::select(ID,SEX,FAM), plant.mat)
-pco.env.c<-envfit(db.ind, btt)
-
-carrow.df<-data.frame(order= rownames(pco.env.c$vectors$arrows), MDS1 = pco.env.c$vectors$arrows[,1], MDS2 = pco.env.c$vectors$arrows[,2], pval = pco.env.c$vectors$pvals, rsq = pco.env.c$vectors$r)%>%
-  filter(pval <= 0.05 ,rsq > 0.10)
-
-cfam.c<-data.frame(FAM = rownames(pco.env.c$factors$centroids), MDS1 = pco.env.c$factors$centroids[,1], MDS2 = pco.env.c$factors$centroids[,2])
-cfam.center<-cfam.c%>%filter(grepl('FAM', FAM))%>%
+#fit genotype, sex centroids, order significance
+plant.env.fam<-envfit(db.ind, plant.df)
+plant.env.fam
+#plot centroids for each genotype
+plant.fam.df<-data.frame(FAM = rownames(plant.env.fam$factors$centroids), CAP1 = plant.env.fam$factors$centroids[,1], CAP2 = plant.env.fam$factors$centroids[,2])%>%
+  filter(grepl('FAM', FAM))%>%
   mutate(FAM =gsub('FAM','', FAM))%>%
-  left_join(arth.ord$comm.df%>%dplyr::select(FAM,SEX)%>%unique()%>%transform(FAM=as.character()))
-cfam.center$SEX<-ifelse(cfam.center$FAM > 20, 'F', 'M')
+  left_join(plant.df%>%dplyr::select(FAM,SEX)%>%unique()%>%transform(FAM=as.character(FAM)))
 
-csex.center<-cfam.c%>%filter(FAM == 'SEXM' | FAM =='SEXF')
+##sex centroids
+plant.sex.df<-data.frame(SEX = rownames(plant.env.fam$factors$centroids), CAP1 = plant.env.fam$factors$centroids[,1], CAP2 = plant.env.fam$factors$centroids[,2])%>%
+  filter(grepl('SEX', SEX))%>%
+  mutate(SEX =gsub('SEX','', SEX))
 
-cplot.df.gg<-data.frame(order=rownames(scores(db.ind, scaling=2, correlation=TRUE)$species), 
-                       MDS1 = scores(db.ind, scaling=2, correlation=TRUE)$species[,1], 
-                       MDS2 = scores(db.ind, scaling=2, correlation=TRUE)$species[,2])%>%filter(order %in% carrow.df$order)
+##individual plants
+plant.id.df<-data.frame(SEX= plant.df$SEX, ID=rownames(db.ind$CA$u),
+                        FAM=plant.df$FAM, 
+                        CAP1 = scores(db.ind, scaling=2, correlation=TRUE)$sites[,1], 
+                        CAP2 = scores(db.ind, scaling=2, correlation=TRUE)$sites[,2])
 
-carrows<-as.data.frame(summary(db.ind)$biplot)
-carrows$trait<-rownames(carrows)
+# arrows for orders, filtered by significance and rsq
+plant.arrow.sp<-data.frame(order= rownames(plant.env.fam$vectors$arrows), CAP1 = plant.env.fam$vectors$arrows[,1], 
+                           CAP2 = plant.env.fam$vectors$arrows[,2], pval = plant.env.fam$vectors$pvals, rsq = plant.env.fam$vectors$r)%>%
+  filter(pval <= 0.05 ,rsq > 0.10)%>%filter(order != 'RGR', order != 'flowers_all')
 
-carrows$MDS1<-carrows$CAP1
-carrows$MDS2<-carrows$CAP2
-carrows<-carrows%>%filter(trait %in% c('flowers_all','Per_H2O','SLA','CN'))
+##ARANEAE, COLEOPTERA,DIPTERA,HEMIPTERA,HYMENOPTERA,PSOCOPTERA,THYSANOPTERA
+
+## arrows based on species scores (not envfit) - not useing
+plant.arrow.spscore<-data.frame(order=rownames(scores(db.ind, scaling=2, correlation=TRUE)$species), 
+                       CAP1 = scores(db.ind, scaling=2, correlation=TRUE)$species[,1], 
+                       CAP2 = scores(db.ind, scaling=2, correlation=TRUE)$species[,2])%>%filter(order %in% carrow.df$order)
+
+##arrows for trait contraints
+plant.arrow.trait<-as.data.frame(summary(db.ind)$biplot)%>%mutate(trait=rownames(.))%>%filter(trait %in% c('flowers_all','SLA','CN','Per_H2O'))
 ```
 ```{r, fig.height=8, fig.width=8}
-plant.triplot<-ggplot(cfam.center, aes(x=MDS1, y=MDS2))+
-    geom_jitter(aes(fill=SEX), shape=21,size=2, alpha=.9)+
-    theme_nell()+
-    scale_fill_manual(values=c('black','white'))+
-    theme(axis.line=element_blank())+
-    geom_hline(aes(yintercept=0), lty='dashed')+
-    geom_vline(aes(xintercept=0), lty='dashed')+
-    geom_segment(data = cplot.df.gg, aes(x = 0, xend = MDS1, y = 0, yend = MDS2),
-                                           arrow = arrow(length = unit(0.2, "cm")), colour = "black", size=1)+
-    geom_text(data=cplot.df.gg, aes(x=MDS1, y=MDS2, label=order))+
-    geom_segment(data =carrows, aes(x = 0, xend = MDS1*2, y = 0, yend = MDS2*2),
-                                           arrow = arrow(length = unit(0.2, "cm")), colour = "green", size=1)+
-  geom_text(data=carrows, aes(x=MDS1*2, y=MDS2*2, label=trait))
-plant.triplot
+##build troplot for constrianed ordinaton on geno
+plant.triplot<-ggplot(plant.fam.df, aes(x=CAP1, y=CAP2))+
+  geom_jitter(aes(fill=SEX), shape=21,size=1)+
+  theme_nell()+
+  scale_fill_manual(values=c('black','white'))+
+  theme(axis.line=element_blank(), axis.ticks=element_blank(), axis.text=element_blank(), axis.title = element_text(size=10))+
+  geom_hline(aes(yintercept=0), lty='dashed')+
+  geom_vline(aes(xintercept=0), lty='dashed')+
+  geom_segment(data = plant.arrow.sp, aes(x = 0, xend = CAP1*rsq*1.4, y = 0, yend = CAP2*rsq*1.4),##arrows for species scores
+                                         arrow = arrow(length = unit(0.2, "cm")), colour = "black", size=1)+
+  geom_text(data=plant.arrow.sp, aes(x=CAP1*rsq*1.4, y=CAP2*rsq*1.4, label=order))+
+  geom_segment(data =plant.arrow.trait, aes(x = 0, xend = CAP1*1.5, y = 0, yend = CAP2*1.5), ###arrows for traits
+                                         arrow = arrow(length = unit(0.2, "cm")), colour = "green", size=1)+
+  geom_text(data=plant.arrow.trait, aes(x=CAP1*1.5, y=CAP2*1.5, label=trait))+
+  labs(x='CAP1 [65%]', y='CAP2 [18%]')+xlim(c(-1.35,1.35))+ylim(c(-1,1))
+plant.triplot #constrained ordination - genetic variation controlling for sex effects
 
-```
-```{r, fig.width=12}
-
-plot_grid(site.sp.plot, plant.triplot, nrow=1, ncol=2, labels=c('Unconstrained','Constrained'))
 ```
 ### Sexual dimorphism in arhtropod composition  
 
 ```{r}
 ##read data
-arth.geno<-list(comm.df = read.csv('GENO_LSM_ARTH_ORD_COMM.csv')%>%transform(FAM = as.factor(FAM)), comm.mat = read.csv('GENO_LSM_ARTH_ORD_MAT.csv'))
+arth.geno<-list(comm.df = read.csv('/Users/colleennell/Dropbox/Projects/BASA/GENO_LSM_ARTH_ORD_COMM.csv')%>%
+                  left_join(lsm.cast%>%dplyr::select(FAM,SEX,RGR,flowers_all, SLA,CN,MT_sum,ST_sum,Per_H2O, leaf.toughness)), ##add trait data
+                comm.mat = read.csv('/Users/colleennell/Dropbox/Projects/BASA/GENO_LSM_ARTH_ORD_MAT.csv'))
 arth.geno$comm.dist <-vegdist(arth.geno$comm.mat, method='bray')
 #permanova
 arth.ad.rg<-adonis(arth.geno$comm.dist~SEX, data=arth.geno$comm.df, permutations=10000)
 arth.ad.rg
+```  
+
+```{r}
+##same constrained analysis but using genotype means
+# community df with only plants that have all traits measured as well as arthropod relative density
+geno.df<-arth.geno$comm.df
+geno.mat<-arth.geno$comm.mat
+geno.dist<-arth.geno$comm.dist##relative densities, bray cutus
+
+#scale traits
+geno.trait.scale<-as.data.frame(scale(geno.df%>%transform(flowers_all = log(flowers_all+2), MT_sum = log(MT_sum+1))%>%dplyr::select(RGR:leaf.toughness)))%>%##scale traits
+  mutate(FAM=geno.df$FAM, SEX= geno.df$SEX) ##add ing rouping vars
+
+##dbRDA - conditioned on ROW (pRDA)
+db.geno<-capscale(geno.dist ~ RGR+flowers_all+SLA+CN+Per_H2O+MT_sum+leaf.toughness, data=geno.trait.scale, comm = geno.mat, na.action = 'na.omit')
+
+head(summary(db.geno)) ##constrained = .11; unconstrained = .62
+anova(db.geno, permutations=1000)  
+anova(db.geno, by='axis', permutations=1000)
+anova(db.geno, by='margin', permutations=1000)
+##traits = rgr, flowers, sla, pwc, 
+
+
 ```
+```{r}
+#fit genotype, sex centroids, order significance
+geno.env.fam<-envfit(db.geno, geno.df)
+geno.env.fam
+
+##sex centroids
+geno.sex.df<-data.frame(SEX = rownames(geno.env.fam$factors$centroids), CAP1 = geno.env.fam$factors$centroids[,1], 
+                        CAP2 = geno.env.fam$factors$centroids[,2])%>%
+  filter(grepl('SEX', SEX))%>%
+  mutate(SEX =gsub('SEX','', SEX))
+
+##individual genotype
+geno.id.df<-data.frame(SEX= geno.df$SEX, FAM=rownames(db.geno$CA$u),
+                        FAM=geno.df$FAM, 
+                        CAP1 = scores(db.geno, scaling=2, correlation=TRUE)$sites[,1], 
+                        CAP2 = scores(db.geno, scaling=2, correlation=TRUE)$sites[,2])
+
+# arrows for orders, filtered by significance and rsq
+geno.arrow.sp<-data.frame(order= rownames(geno.env.fam$vectors$arrows), CAP1 = geno.env.fam$vectors$arrows[,1], 
+                           CAP2 = geno.env.fam$vectors$arrows[,2], pval = geno.env.fam$vectors$pvals, rsq = geno.env.fam$vectors$r)%>%
+  filter(pval <= 0.05 ,rsq > 0.10)%>%filter(order != 'RGR', order != 'flowers_all', order != 'FAM')
+
+##ARANEAE, COLEOPTERA,DIPTERA,HEMIPTERA,HYMENOPTERA,PSOCOPTERA,THYSANOPTERA
+
+## arrows based on species scores (not envfit) - not useing
+geno.arrow.spscore<-data.frame(order=rownames(scores(db.geno, scaling=2, correlation=TRUE)$species), 
+                       CAP1 = scores(db.geno, scaling=2, correlation=TRUE)$species[,1], 
+                       CAP2 = scores(db.geno, scaling=2, correlation=TRUE)$species[,2])%>%filter(order %in% geno.arrow.sp$order)
+
+##arrows for trait contraints
+geno.arrow.trait<-as.data.frame(summary(db.geno)$biplot)%>%mutate(trait=rownames(.))%>%
+  filter(trait %in% c('flowers_all','SLA','RGR','Per_H2O'))
+
+
+##build troplot for constrianed ordinaton on geno
+geno.triplot<-ggplot(geno.id.df, aes(x=CAP1, y=CAP2))+
+  geom_jitter(aes(fill=SEX), shape=21,size=1)+
+  theme_nell()+
+  labs(x='CAP1 [62%]', y='CAP2 [19%]')+
+  scale_fill_manual(values=c('black','white'))+
+  theme(axis.line=element_blank(), axis.ticks=element_blank(), axis.text=element_blank(), axis.title = element_text(size=10))+
+  geom_hline(aes(yintercept=0), lty='dashed')+
+  geom_vline(aes(xintercept=0), lty='dashed')+
+  geom_segment(data = geno.arrow.sp, aes(x = 0, xend = CAP1*rsq*3, y = 0, yend = CAP2*rsq*3),##arrows for species scores
+                                         arrow = arrow(length = unit(0.2, "cm")), colour = "black", size=1)+
+  geom_text(data=geno.arrow.sp, aes(x=CAP1*rsq*3, y=CAP2*rsq*3, label=order))+
+  geom_segment(data =geno.arrow.trait, aes(x = 0, xend = CAP1*1, y = 0, yend = CAP2*1), ###arrows for traits
+                                         arrow = arrow(length = unit(0.2, "cm")), colour = "green", size=1)+
+  geom_text(data=geno.arrow.trait, aes(x=CAP1*1.3, y=CAP2*1.3, label=trait))+
+  xlim(c(-1.5,1.6))+ylim(c(-1.4,1.1))+
+  geom_text(data=geno.sex.df, aes(x=CAP1, y=CAP2, label=SEX), size=5)+ ##sex centroids
+  stat_ellipse(data=geno.id.df,aes(group=SEX, lty=SEX),type='t', level=.95) ##elolipses
+  
+geno.triplot #constrained ordination - genetic variation controlling for sex effects
+```
+```{r, fig.width=6, fig.height=10}
+
+triplot.fig<-plot_grid(plant.triplot, geno.triplot,labels=c('(a)','(b)'), nrow=2, ncol=1)
+triplot.fig
+
+ggsave(triplot.fig, file='Fig_uncon_gen_triplot.pdf', width=100, height=210,units='mm')
+```
+
 ```{r}
 pco.geno<-capscale(arth.geno$comm.dist ~ 1 , data=arth.geno$comm.df, comm = arth.geno$comm.mat)
 #str(arth.geno$comm.df)
@@ -318,13 +418,13 @@ plot.gen<-unc_plot(df=plot.g, fam.df=plot.g$ind.df, ind.df = plot.g$ind.df,speci
 #plot centroids for each genotype, unconstrained ordination
 geno.ind<-data.frame(ID = rownames(pco.geno$CA$u), SEX= arth.geno$comm.df$SEX, 
                         FAM=arth.geno$comm.df$FAM,
-                        MDS1 = scores(pco.geno, scaling=3, correlation=TRUE)$sites[,1], 
-                        MDS2 = scores(pco.geno, scaling=3, correlation=TRUE)$sites[,2])
+                        MDS1 = scores(pco.geno, scaling=2, correlation=TRUE)$sites[,1], 
+                        MDS2 = scores(pco.geno, scaling=2, correlation=TRUE)$sites[,2])
 
 ##this si scaling 2 (species axes correlations)
-geno.sp<-data.frame(label=rownames(scores(pco.geno, scaling=3, correlation=TRUE)$species), 
-                       MDS1 = scores(pco.geno, scaling=3, correlation=TRUE)$species[,1], 
-                       MDS2 = scores(pco.geno, scaling=3, correlation=TRUE)$species[,2])
+geno.sp<-data.frame(label=rownames(scores(pco.geno, scaling=2, correlation=TRUE)$species), 
+                       MDS1 = scores(pco.geno, scaling=2, correlation=TRUE)$species[,1], 
+                       MDS2 = scores(pco.geno, scaling=2, correlation=TRUE)$species[,2])
 
 ##use envfit for fitted order arrows
 #inertia is variance in species abundance
